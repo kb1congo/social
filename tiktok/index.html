@@ -1,0 +1,156 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Diagnostic TikTok - Safari 9</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 15px;
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: #fff;
+        }
+
+        iframe {
+            display: block;
+            width: 100%;
+            max-width: 400px;
+            height: 650px;
+            border: 0;
+            margin: 15px auto;
+        }
+
+        button {
+            padding: 12px 20px;
+            margin: 5px;
+        }
+
+        #status {
+            padding: 10px;
+            background: #292929;
+            overflow-wrap: break-word;
+        }
+
+        #events {
+            background: #222;
+            padding: 10px;
+            font-size: 12px;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+
+<body>
+
+<h3>Test TikTok Embed Player</h3>
+
+<p id="status">Initialisation de la page...</p>
+
+<iframe
+    id="tiktok-player"
+    src="https://www.tiktok.com/player/v1/6718335390845095173?controls=1&description=1"
+    allowfullscreen>
+</iframe>
+
+<button id="play" disabled>Lire</button>
+<button id="pause" disabled>Pause</button>
+
+<h4>Diagnostic du lecteur</h4>
+<div id="events">En attente des événements TikTok...</div>
+
+<script>
+(function () {
+
+    var player = document.getElementById('tiktok-player');
+    var status = document.getElementById('status');
+    var events = document.getElementById('events');
+    var ready = false;
+
+    function log(message) {
+        var line = document.createElement('div');
+        line.appendChild(document.createTextNode(message));
+        events.appendChild(line);
+    }
+
+    function receiveMessage(event) {
+
+        if (event.source !== player.contentWindow) {
+            return;
+        }
+
+        var data = event.data;
+
+        if (typeof data === 'string') {
+            try {
+                data = JSON.parse(data);
+            } catch (e) {
+                log('Message non JSON : ' + data);
+                return;
+            }
+        }
+
+        if (!data || data['x-tiktok-player'] !== true) {
+            log('Message reçu, format non reconnu. Origine : ' + event.origin);
+            return;
+        }
+
+        log('Origine : ' + event.origin);
+        log('Événement : ' + JSON.stringify(data));
+
+        if (data.type === 'onPlayerReady') {
+            ready = true;
+            status.innerHTML = 'Lecteur initialisé : prêt.';
+            document.getElementById('play').disabled = false;
+            document.getElementById('pause').disabled = false;
+        }
+
+        if (data.type === 'onPlayerError') {
+            status.innerHTML = 'Erreur TikTok : ' + JSON.stringify(data.value);
+        }
+
+        if (data.type === 'onStateChange') {
+            status.innerHTML = 'État du lecteur : ' + data.value;
+        }
+    }
+
+    window.addEventListener('message', receiveMessage, false);
+
+    player.onload = function () {
+        status.innerHTML = 'Iframe chargée. Attente de onPlayerReady...';
+        log('Chargement de l iframe terminé.');
+    };
+
+    function sendCommand(type) {
+
+        if (!ready) {
+            status.innerHTML = 'Le lecteur n est pas encore prêt.';
+            return;
+        }
+
+        player.contentWindow.postMessage({
+            type: type,
+            value: null,
+            'x-tiktok-player': true
+        }, '*');
+
+        log('Commande envoyée : ' + type);
+    }
+
+    document.getElementById('play').onclick = function () {
+        sendCommand('play');
+    };
+
+    document.getElementById('pause').onclick = function () {
+        sendCommand('pause');
+    };
+
+})();
+</script>
+
+</body>
+</html>
