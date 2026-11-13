@@ -1,8 +1,9 @@
+
 {
   "name": "whatsapp-personal-gateway-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Passerelle WhatsApp Web et événements SSE",
+  "description": "Passerelle WhatsApp multi-comptes avec Baileys et événements SSE",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
@@ -11,7 +12,8 @@
     "node": ">=24"
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "6.7.24",
     "express": "^5.1.0",
-    "whatsapp-web.js": "^1.34.1"
+    "qrcode": "^1.5.4"
   }
 }

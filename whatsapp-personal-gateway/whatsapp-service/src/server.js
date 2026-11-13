@@ -39,6 +39,7 @@ let whatsappState = 'initializing';
 let lastQr = null;
 
 const client = new Client({
+  authTimeoutMs: 120000,
   authStrategy: new LocalAuth({
     clientId: CLIENT_ID,
     dataPath: DATA_PATH
@@ -171,9 +172,84 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Passerelle démarrée sur le port ${PORT}.`);
 });
 
-client.initialize().catch((error) => {
+/*client.initialize().catch((error) => {
   whatsappState = 'initialization_error';
   console.error('Impossible d’initialiser WhatsApp :', error.message);
+});*/
+/*client.initialize().catch((error) => {
+  whatsappState = 'initialization_error';
+
+  console.error('Impossible d’initialiser WhatsApp.');
+  console.error('Nom :', error.name);
+  console.error('Message :', error.message);
+  console.error('Stack :', error.stack);
+});*/
+let debugAttached = false;
+
+const debugTimer = setInterval(() => {
+  const page = client.pupPage;
+
+  if (!page || debugAttached) return;
+
+  debugAttached = true;
+  clearInterval(debugTimer);
+
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      console.error('[CHROMIUM CONSOLE]', message.text());
+    }
+  });
+
+  page.on('pageerror', (error) => {
+    console.error('[CHROMIUM PAGE ERROR]', error.message);
+  });
+
+  page.on('requestfailed', (request) => {
+    console.error(
+      '[CHROMIUM REQUEST FAILED]',
+      request.url(),
+      request.failure()?.errorText
+    );
+  });
+
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      console.error(
+        '[CHROMIUM HTTP ERROR]',
+        response.status(),
+        response.url()
+      );
+    }
+  });
+
+  console.log('[CHROMIUM DEBUG] Diagnostic activé.');
+}, 100);
+
+client.initialize().catch(async (error) => {
+  whatsappState = 'initialization_error';
+
+  clearInterval(debugTimer);
+
+  console.error('[WHATSAPP INIT ERROR]', error.stack || error.message);
+
+  try {
+    const page = client.pupPage;
+
+    if (page) {
+      const details = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        readyState: document.readyState,
+        debugVersion: window.Debug?.VERSION ?? null,
+        bodyText: document.body?.innerText?.slice(0, 1000) ?? null,
+        scripts: [...document.scripts].map(script => script.src).filter(Boolean)
+      }));
+
+      console.error('[WHATSAPP PAGE DETAILS]', JSON.stringify(details, null, 2));
+    }
+  } catch (debugError) {
+    console.error('[WHATSAPP PAGE INSPECTION ERROR]', debugError.message);
+  }
 });
 
 async function shutdown() {
