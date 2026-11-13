@@ -15,7 +15,7 @@ final class Auth
      */
     public function login(string $email, string $password): bool
     {
-        $stmt = $this->database->getConnexion()->prepare(
+        $stmt = $this->database->getPdo()->prepare(
             'SELECT id, full_name, email, password_hash, role
              FROM users
              WHERE email = :email

@@ -21,38 +21,153 @@ final class WhatsAppGateway
     }
 
     /**
-     * Récupère le statut de la connexion WhatsApp.
+     * Liste tous les comptes WhatsApp connus de Baileys.
      */
-    public function getStatus(): array
+    public function listAccounts(): array
     {
-        return $this->request('/internal/whatsapp/status');
+        $result = $this->request(
+            'GET',
+            '/internal/whatsapp/accounts'
+        );
+
+        return $result['accounts'] ?? [];
     }
 
     /**
-     * Récupère le QR code WhatsApp courant.
+     * Démarre ou reprend une connexion WhatsApp.
      */
-    public function getQr(): array
+    public function connectAccount(string $accountId): array
     {
-        return $this->request('/internal/whatsapp/qr');
+        $this->validateAccountId($accountId);
+
+        return $this->request(
+            'POST',
+            '/internal/whatsapp/accounts/' . rawurlencode($accountId) . '/connect'
+        );
     }
 
-    private function request(string $endpoint): array
+    /**
+     * Récupère le statut d'un compte.
+     */
+    public function getAccountStatus(string $accountId): array
     {
-        $url = $this->baseUrl . $endpoint;
+        $this->validateAccountId($accountId);
+
+        return $this->request(
+            'GET',
+            '/internal/whatsapp/accounts/' . rawurlencode($accountId) . '/status'
+        );
+    }
+
+    /**
+     * Récupère le QR code d'un compte.
+     */
+    public function getAccountQr(string $accountId): array
+    {
+        $this->validateAccountId($accountId);
+
+        return $this->request(
+            'GET',
+            '/internal/whatsapp/accounts/' . rawurlencode($accountId) . '/qr'
+        );
+    }
+
+    /**
+     * Envoie un message depuis un compte déterminé.
+     */
+    public function sendMessage(
+        string $accountId,
+        string $recipient,
+        string $message
+    ): array {
+        $this->validateAccountId($accountId);
+
+        if (trim($recipient) === '' || trim($message) === '') {
+            throw new InvalidArgumentException(
+                'Le destinataire et le message sont obligatoires.'
+            );
+        }
+
+        return $this->request(
+            'POST',
+            '/internal/whatsapp/accounts/' . rawurlencode($accountId) . '/send',
+            [
+                'to' => trim($recipient),
+                'message' => trim($message),
+            ]
+        );
+    }
+
+    /**
+     * Compatibilité temporaire avec les anciennes routes.
+     */
+    public function getStatus(): array
+    {
+        return $this->request(
+            'GET',
+            '/internal/whatsapp/status'
+        );
+    }
+
+    public function getQr(): array
+    {
+        return $this->request(
+            'GET',
+            '/internal/whatsapp/qr'
+        );
+    }
+
+    /**
+     * Vérifie le format d'un identifiant Baileys.
+     */
+    private function validateAccountId(string $accountId): void
+    {
+        if (!preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $accountId)) {
+            throw new InvalidArgumentException(
+                'Identifiant de compte invalide.'
+            );
+        }
+    }
+
+    /**
+     * Effectue une requête HTTP interne vers Node.js.
+     */
+    private function request(
+        string $method,
+        string $endpoint,
+        ?array $payload = null
+    ): array {
+        $headers = [
+            'Authorization: Bearer ' . $this->token,
+            'Accept: application/json',
+        ];
+
+        $options = [
+            'method' => $method,
+            'header' => implode("\r\n", $headers),
+            'timeout' => 15,
+            'ignore_errors' => true,
+        ];
+
+        if ($payload !== null) {
+            $json = json_encode(
+                $payload,
+                JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
+            );
+
+            $options['header'] .= "\r\nContent-Type: application/json";
+            $options['content'] = $json;
+        }
 
         $context = stream_context_create([
-            'http' => [
-                'method' => 'GET',
-                'header' => [
-                    'Authorization: Bearer ' . $this->token,
-                    'Accept: application/json',
-                ],
-                'timeout' => 10,
-                'ignore_errors' => true,
-            ],
+            'http' => $options,
         ]);
 
-        $response = @file_get_contents($url, false, $context);
+        $response = @file_get_contents(
+            $this->baseUrl . $endpoint,
+            false,
+            $context
+        );
 
         if ($response === false) {
             throw new RuntimeException(
@@ -63,7 +178,9 @@ final class WhatsAppGateway
         $statusLine = $http_response_header[0] ?? '';
 
         if (!preg_match('/\s(\d{3})\s/', $statusLine, $matches)) {
-            throw new RuntimeException('Réponse HTTP invalide de Node.js.');
+            throw new RuntimeException(
+                'Réponse HTTP invalide de Node.js.'
+            );
         }
 
         $httpStatus = (int) $matches[1];
@@ -71,12 +188,17 @@ final class WhatsAppGateway
         $data = json_decode($response, true);
 
         if (!is_array($data)) {
-            throw new RuntimeException('Réponse JSON invalide de Node.js.');
+            throw new RuntimeException(
+                'Réponse JSON invalide de Node.js.'
+            );
         }
 
-        if ($httpStatus >= 400) {
+        if ($httpStatus < 200 || $httpStatus >= 300) {
+            $error = $data['error'] ?? 'whatsapp_gateway_error';
+
             throw new RuntimeException(
-                $data['error'] ?? 'Erreur de la passerelle WhatsApp.'
+                'Erreur passerelle : ' . $error,
+                $httpStatus
             );
         }
 
