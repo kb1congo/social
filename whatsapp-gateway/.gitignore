@@ -1,0 +1,6 @@
+.env
+/vendor/
+/whatsapp-service/node_modules/
+/whatsapp-service/sessions/
+/storage/logs/*
+!/storage/logs/.gitkeep
