@@ -23,17 +23,27 @@ if (!INTERNAL_API_TOKEN) {
   throw new Error('INTERNAL_API_TOKEN est obligatoire.');
 }
 
-// Journalisation Baileys
+// ---------------------------------------------------------------------
+// Journalisation
+// ---------------------------------------------------------------------
+
 const logger = pino({
   level: process.env.BAILEYS_LOG_LEVEL || 'silent'
 });
 
+// ---------------------------------------------------------------------
 // Gestion des connexions
+// ---------------------------------------------------------------------
+
 const accounts = new Map();
 const sseClients = new Set();
 
 let baileysModule = null;
 let server = null;
+
+// ---------------------------------------------------------------------
+// Sécurité
+// ---------------------------------------------------------------------
 
 function safeEqual(a, b) {
   const left = Buffer.from(String(a));
@@ -59,6 +69,10 @@ function validAccountId(accountId) {
     /^[a-zA-Z0-9_-]{1,64}$/.test(accountId);
 }
 
+// ---------------------------------------------------------------------
+// Comptes WhatsApp
+// ---------------------------------------------------------------------
+
 function getAccount(accountId) {
   if (!validAccountId(accountId)) {
     return null;
@@ -82,6 +96,10 @@ function getAccount(accountId) {
   return accounts.get(accountId);
 }
 
+// ---------------------------------------------------------------------
+// Événements SSE
+// ---------------------------------------------------------------------
+
 function publish(event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
@@ -101,6 +119,127 @@ function publish(event, data) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Persistance des messages dans PHP / MySQL
+// ---------------------------------------------------------------------
+
+async function persistWhatsAppMessage(event) {
+  try {
+    const response = await fetch(
+      `${process.env.PHP_INTERNAL_URL || 'http://nginx'}/internal/whatsapp-event.php`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${INTERNAL_API_TOKEN}`
+        },
+        body: JSON.stringify(event),
+        signal: AbortSignal.timeout(10000)
+      }
+    );
+
+    if (!response.ok) {
+      const details = await response.text();
+
+      console.error(
+        `[${event.accountId}] Échec de persistance HTTP ${response.status}:`,
+        details
+      );
+
+      return false;
+    }
+
+    const result = await response.json();
+
+    if (result.success !== true) {
+      console.error(
+        `[${event.accountId}] Persistance refusée :`,
+        result.error || 'Erreur inconnue'
+      );
+
+      return false;
+    }
+
+    return true;
+
+  } catch (error) {
+    console.error(
+      `[${event.accountId}] Erreur de persistance :`,
+      error.message
+    );
+
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Persistance des correspondances LID / JID
+// ---------------------------------------------------------------------
+
+async function persistWhatsAppContactMapping(accountId, lid, jid, source) {
+  const normalizedLid = String(lid || '').trim();
+  const normalizedJid = String(jid || '').trim();
+
+  // Ne jamais déduire un numéro de téléphone à partir d'un LID.
+  if (!/^[0-9]{1,30}@lid$/.test(normalizedLid)) {
+    return false;
+  }
+
+  if (!/^[0-9]{5,20}@s\.whatsapp\.net$/.test(normalizedJid)) {
+    return false;
+  }
+
+  const persisted = await persistWhatsAppMessage({
+    eventType: 'contact_mapping',
+    accountId,
+    lid: normalizedLid,
+    jid: normalizedJid
+  });
+
+  console.log(
+    `[${accountId}] Correspondance LID/JID (${source}) : ${persisted ? 'OK' : 'ÉCHEC'}`,
+    {
+      lid: normalizedLid,
+      jid: normalizedJid
+    }
+  );
+
+  return persisted;
+}
+
+async function handleContactMappings(account, socket, contacts, source) {
+  // Ignorer les événements d'une ancienne connexion.
+  if (account.socket !== socket || !Array.isArray(contacts)) {
+    return;
+  }
+
+  for (const contact of contacts) {
+    const id = String(contact?.id || '').trim();
+
+    const lid = contact?.lid ||
+      (/^[0-9]{1,30}@lid$/.test(id) ? id : null);
+
+    const jid = contact?.jid ||
+      (/^[0-9]{5,20}@s\.whatsapp\.net$/.test(id) ? id : null);
+
+    if (!lid || !jid) {
+      continue;
+    }
+
+    await persistWhatsAppContactMapping(
+      account.id,
+      lid,
+      jid,
+      source
+    );
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Statut des comptes
+// ---------------------------------------------------------------------
+
 function updateStatus(account, status, extra = {}) {
   account.status = status;
 
@@ -119,10 +258,13 @@ function getDisconnectCode(error) {
     null;
 }
 
-function extractMessageText(message) {
+// ---------------------------------------------------------------------
+// Extraction du contenu des messages
+// ---------------------------------------------------------------------
+
+function unwrapMessageContent(message) {
   let content = message?.message;
 
-  // Déballage des messages éphémères et autres enveloppes.
   while (content) {
     if (content.ephemeralMessage?.message) {
       content = content.ephemeralMessage.message;
@@ -139,20 +281,133 @@ function extractMessageText(message) {
       continue;
     }
 
+    if (content.documentWithCaptionMessage?.message) {
+      content = content.documentWithCaptionMessage.message;
+      continue;
+    }
+
     break;
   }
 
-  return (
-    content?.conversation ||
-    content?.extendedTextMessage?.text ||
-    content?.imageMessage?.caption ||
-    content?.videoMessage?.caption ||
-    content?.documentMessage?.caption ||
-    content?.buttonsResponseMessage?.selectedDisplayText ||
-    content?.listResponseMessage?.title ||
-    null
-  );
+  return content;
 }
+
+
+function extractMessageText(message) {
+  const content = unwrapMessageContent(message);
+
+  if (!content) {
+    return null;
+  }
+
+  const candidates = [
+    content.conversation,
+    content.extendedTextMessage?.text,
+    content.imageMessage?.caption,
+    content.videoMessage?.caption,
+    content.documentMessage?.caption,
+    content.buttonsResponseMessage?.selectedDisplayText,
+    content.buttonsResponseMessage?.selectedButtonId,
+    content.listResponseMessage?.title,
+    content.listResponseMessage?.singleSelectReply?.selectedRowId,
+    content.templateButtonReplyMessage?.selectedDisplayText,
+    content.templateButtonReplyMessage?.selectedId,
+    content.reactionMessage?.text,
+    content.pollCreationMessage?.name,
+    content.pollCreationMessageV2?.name,
+    content.pollCreationMessageV3?.name,
+    content.contactMessage?.displayName,
+    content.locationMessage?.name,
+    content.locationMessage?.address,
+    content.editedMessage?.message?.conversation,
+    content.editedMessage?.message?.extendedTextMessage?.text
+  ];
+
+  const text = candidates.find(
+    value => typeof value === 'string' && value.trim() !== ''
+  );
+
+  return text ? text.trim() : null;
+}
+
+function extractMessageType(message) {
+  const content = unwrapMessageContent(message);
+
+  if (!content) {
+    return 'unknown';
+  }
+
+  const types = {
+    conversation: 'chat',
+    extendedTextMessage: 'chat',
+    imageMessage: 'image',
+    videoMessage: 'video',
+    audioMessage: 'audio',
+    documentMessage: 'document',
+    stickerMessage: 'sticker',
+    locationMessage: 'location',
+    liveLocationMessage: 'location',
+    contactMessage: 'contact',
+    contactsArrayMessage: 'contact',
+    buttonsResponseMessage: 'interactive',
+    listResponseMessage: 'interactive',
+    templateButtonReplyMessage: 'interactive',
+    interactiveResponseMessage: 'interactive',
+    interactiveMessage: 'interactive',
+    reactionMessage: 'reaction',
+    pollCreationMessage: 'poll',
+    pollCreationMessageV2: 'poll',
+    pollCreationMessageV3: 'poll',
+    pollUpdateMessage: 'poll_vote',
+    protocolMessage: 'protocol',
+    senderKeyDistributionMessage: 'system',
+    messageContextInfo: 'system',
+    ephemeralMessage: 'system',
+    viewOnceMessage: 'system',
+    viewOnceMessageV2: 'system',
+    documentWithCaptionMessage: 'document',
+    editedMessage: 'chat',
+    ptvMessage: 'video',
+    eventMessage: 'event',
+    keepInChatMessage: 'system',
+    pinInChatMessage: 'system',
+    requestPhoneNumberMessage: 'contact'
+  };
+
+  for (const [key, type] of Object.entries(types)) {
+    if (content[key]) {
+      return type;
+    }
+  }
+
+  // Identification des autres types de contenus non encore répertoriés.
+  const ignoredKeys = [
+    'messageContextInfo',
+    'senderKeyDistributionMessage'
+  ];
+
+  const firstType = Object.keys(content).find(
+    key =>
+      !ignoredKeys.includes(key) &&
+      content[key] !== null &&
+      content[key] !== undefined
+  );
+
+  if (!firstType) {
+    return 'unknown';
+  }
+
+  return firstType
+    .replace(/Message$/, '')
+    .replace(/([A-Z])/g, '_$1')
+    .replace(/^_/, '')
+    .toLowerCase();
+}
+
+
+// ---------------------------------------------------------------------
+// Chargement de Baileys
+// ---------------------------------------------------------------------
 
 async function loadBaileys() {
   if (baileysModule) {
@@ -161,10 +416,6 @@ async function loadBaileys() {
 
   const imported = await import('@whiskeysockets/baileys');
 
-  /*baileysModule = {
-    makeWASocket: imported.default || imported.makeWASocket,
-    DisconnectReason: imported.DisconnectReason
-  };*/
   baileysModule = {
     makeWASocket: imported.default || imported.makeWASocket,
     DisconnectReason: imported.DisconnectReason,
@@ -175,8 +426,16 @@ async function loadBaileys() {
     throw new Error('Impossible de charger makeWASocket depuis Baileys.');
   }
 
+  if (typeof baileysModule.useMultiFileAuthState !== 'function') {
+    throw new Error('Impossible de charger useMultiFileAuthState depuis Baileys.');
+  }
+
   return baileysModule;
 }
+
+// ---------------------------------------------------------------------
+// Reconnexion automatique
+// ---------------------------------------------------------------------
 
 function scheduleReconnect(account) {
   if (account.manualLogout || account.reconnectTimer) {
@@ -204,11 +463,86 @@ function scheduleReconnect(account) {
         `[${account.id}] Échec de reconnexion :`,
         error.message
       );
+
+      scheduleReconnect(account);
     }
   }, delay);
 
   account.reconnectTimer.unref?.();
 }
+
+// ---------------------------------------------------------------------
+// Traitement des événements WhatsApp
+// ---------------------------------------------------------------------
+
+async function handleMessagesUpsert(account, socket, data) {
+  // Ignorer les événements provenant d'une ancienne connexion.
+  if (account.socket !== socket) {
+    return;
+  }
+
+  const { messages, type } = data;
+
+  console.log(
+    `[${account.id}] Messages WhatsApp : type=${type}, nombre=${messages?.length || 0}`
+  );
+
+  if (!['notify', 'append'].includes(type)) {
+    return;
+  }
+
+  for (const message of messages || []) {
+    const key = message.key || {};
+    const remoteJid = key.remoteJid || null;
+
+    // Exclure les statuts WhatsApp et les événements sans destinataire.
+    if (!remoteJid || remoteJid === 'status@broadcast') {
+      continue;
+    }
+
+    const messageId = key.id || null;
+
+    if (!messageId) {
+      continue;
+    }
+
+    const event = {
+      accountId: account.id,
+      messageId,
+      remoteJid,
+      participant: key.participant || null,
+      participantPn: key.participantPn || null,
+      fromMe: Boolean(key.fromMe),
+      pushName: message.pushName || null,
+      body: extractMessageText(message),
+      timestamp: Number(message.messageTimestamp || 0),
+      messageType: extractMessageType(message)
+    };
+
+    console.log(`[${account.id}] Message WhatsApp :`, {
+      id: event.messageId,
+      from: event.remoteJid,
+      fromMe: event.fromMe,
+      type: event.messageType
+    });
+
+    const stored = await persistWhatsAppMessage(event);
+
+    console.log(
+      `[${account.id}] Persistance du message ${event.messageId} : ${stored ? 'OK' : 'ÉCHEC'}`
+    );
+
+    // Publier l'événement après son traitement.
+    publish('whatsapp.message.received', {
+      ...event,
+      persisted: stored
+    });
+  }
+}
+
+// ---------------------------------------------------------------------
+// Démarrage d'un compte WhatsApp
+// ---------------------------------------------------------------------
 
 async function startAccount(accountId) {
   if (!validAccountId(accountId)) {
@@ -266,6 +600,7 @@ async function startAccount(accountId) {
 
       account.socket = socket;
 
+      // Sauvegarde des identifiants de session.
       socket.ev.on('creds.update', async () => {
         try {
           await saveCreds();
@@ -277,8 +612,87 @@ async function startAccount(accountId) {
         }
       });
 
+      // ---------------------------------------------------------------
+      // Synchronisation des correspondances LID / JID
+      // ---------------------------------------------------------------
+
+      // Partage explicite d'un numéro de téléphone.
+      socket.ev.on('chats.phoneNumberShare', async ({ lid, jid } = {}) => {
+        console.log(`[${accountId}] Événement phoneNumberShare reçu :`, { lid, jid });
+        try {
+          if (account.socket !== socket) {
+            return;
+          }
+
+          await persistWhatsAppContactMapping(
+            accountId,
+            lid,
+            jid,
+            'chats.phoneNumberShare'
+          );
+        } catch (error) {
+          console.error(
+            `[${accountId}] Erreur phoneNumberShare :`,
+            error.message
+          );
+        }
+      });
+
+      // Nouveaux contacts synchronisés.
+      socket.ev.on('contacts.upsert', async (contacts) => {
+        console.log(`[${accountId}] contacts.upsert reçu :`, JSON.stringify(contacts));
+        try {
+          await handleContactMappings(
+            account,
+            socket,
+            contacts,
+            'contacts.upsert'
+          );
+        } catch (error) {
+          console.error(
+            `[${accountId}] Erreur contacts.upsert :`,
+            error.message
+          );
+        }
+      });
+
+      // Mise à jour des contacts.
+      socket.ev.on('contacts.update', async (contacts) => {
+        try {
+          await handleContactMappings(
+            account,
+            socket,
+            contacts,
+            'contacts.update'
+          );
+        } catch (error) {
+          console.error(
+            `[${accountId}] Erreur contacts.update :`,
+            error.message
+          );
+        }
+      });
+
+      // Contacts issus de la synchronisation de l'historique.
+      socket.ev.on('messaging-history.set', async ({ contacts } = {}) => {
+        console.log(`[${accountId}] messaging-history.set reçu :`, contacts?.length || 0, 'contacts');
+        try {
+          await handleContactMappings(
+            account,
+            socket,
+            contacts,
+            'messaging-history.set'
+          );
+        } catch (error) {
+          console.error(
+            `[${accountId}] Erreur messaging-history.set :`,
+            error.message
+          );
+        }
+      });
+
+      // Gestion de la connexion.
       socket.ev.on('connection.update', async (update) => {
-        // Ignorer les événements d'une ancienne connexion.
         if (account.socket !== socket) {
           return;
         }
@@ -287,12 +701,19 @@ async function startAccount(accountId) {
 
         if (qr) {
           try {
+            const qrDataUrl = await QRCode.toDataURL(qr);
+
+            if (account.socket !== socket) {
+              return;
+            }
+
             account.qr = qr;
-            account.qrDataUrl = await QRCode.toDataURL(qr);
+            account.qrDataUrl = qrDataUrl;
 
             updateStatus(account, 'qr');
 
             console.log(`[${accountId}] QR code disponible.`);
+
           } catch (error) {
             console.error(
               `[${accountId}] Erreur de génération du QR :`,
@@ -352,25 +773,15 @@ async function startAccount(accountId) {
         }
       });
 
-      socket.ev.on('messages.upsert', ({ messages, type }) => {
-        if (type !== 'notify') {
-          return;
-        }
-
-        for (const message of messages || []) {
-          const key = message.key || {};
-          const text = extractMessageText(message);
-
-          publish('whatsapp.message.received', {
-            accountId,
-            id: key.id || null,
-            from: key.remoteJid || null,
-            participant: key.participant || null,
-            fromMe: Boolean(key.fromMe),
-            pushName: message.pushName || null,
-            body: text,
-            timestamp: Number(message.messageTimestamp || 0)
-          });
+      // Réception et persistance des messages.
+      socket.ev.on('messages.upsert', async (data) => {
+        try {
+          await handleMessagesUpsert(account, socket, data);
+        } catch (error) {
+          console.error(
+            `[${accountId}] Erreur de traitement des messages :`,
+            error.message
+          );
         }
       });
 
@@ -397,6 +808,10 @@ async function startAccount(accountId) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Informations sur les comptes
+// ---------------------------------------------------------------------
+
 function accountStatus(account) {
   return {
     accountId: account.id,
@@ -406,6 +821,10 @@ function accountStatus(account) {
   };
 }
 
+// ---------------------------------------------------------------------
+// Normalisation des destinataires
+// ---------------------------------------------------------------------
+
 function normalizeRecipient(to) {
   if (typeof to !== 'string' || !to.trim()) {
     return null;
@@ -413,16 +832,17 @@ function normalizeRecipient(to) {
 
   const value = to.trim();
 
-  // Identifiant WhatsApp complet : numéro individuel ou groupe.
+  // Identifiant WhatsApp individuel.
   if (/^\d+@s\.whatsapp\.net$/.test(value)) {
     return value;
   }
 
+  // Identifiant de groupe WhatsApp.
   if (/^\d{5,30}-\d+@g\.us$/.test(value)) {
     return value;
   }
 
-  // Numéro international : chiffres uniquement.
+  // Numéro international.
   const phone = value.replace(/[^\d]/g, '');
 
   if (phone.length < 7 || phone.length > 15) {
@@ -488,7 +908,6 @@ app.get('/events', (req, res) => {
 
   sseClients.add(client);
 
-  // Transmettre immédiatement l'état des comptes.
   for (const account of accounts.values()) {
     if (!accountId || account.id === accountId) {
       res.write(
@@ -498,7 +917,12 @@ app.get('/events', (req, res) => {
   }
 
   const heartbeat = setInterval(() => {
-    res.write(': heartbeat\n\n');
+    try {
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(client);
+    }
   }, 25000);
 
   req.on('close', () => {
@@ -534,6 +958,7 @@ app.post(
         accepted: true,
         ...accountStatus(account)
       });
+
     } catch (error) {
       res.status(502).json({
         error: 'whatsapp_connection_failed',
@@ -585,6 +1010,10 @@ app.get(
   }
 );
 
+// ---------------------------------------------------------------------
+// Envoi d'un message pour un compte
+// ---------------------------------------------------------------------
+
 app.post(
   '/internal/whatsapp/accounts/:accountId/send',
   requireInternalToken,
@@ -597,10 +1026,7 @@ app.post(
 
     const { to, message } = req.body || {};
 
-    if (
-      typeof message !== 'string' ||
-      !message.trim()
-    ) {
+    if (typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({
         error: 'message_required'
       });
@@ -627,11 +1053,38 @@ app.post(
         { text: message.trim() }
       );
 
+      const messageId = result?.key?.id || null;
+
+      let persisted = false;
+
+      if (messageId) {
+        persisted = await persistWhatsAppMessage({
+          accountId: account.id,
+          messageId,
+          remoteJid: result?.key?.remoteJid || recipient,
+          participant: result?.key?.participant || null,
+          participantPn: result?.key?.participantPn || null,
+          fromMe: true,
+          pushName: null,
+          body: message.trim(),
+          timestamp: Number(
+            result?.messageTimestamp || Math.floor(Date.now() / 1000)
+          ),
+          messageType: 'chat'
+        });
+      }
+
+      console.log(
+        `[${account.id}] Message sortant ${messageId || 'sans ID'} : ${persisted ? 'persisté' : 'non persisté'}`
+      );
+
       res.json({
         accepted: true,
         accountId: account.id,
-        messageId: result?.key?.id || null
+        messageId,
+        persisted
       });
+
     } catch (error) {
       console.error(
         `[${account.id}] Échec de l'envoi :`,
@@ -690,8 +1143,6 @@ app.post(
   '/internal/whatsapp/send',
   requireInternalToken,
   async (req, res) => {
-    req.params.accountId = DEFAULT_ACCOUNT_ID;
-
     const account = getAccount(DEFAULT_ACCOUNT_ID);
     const { to, message } = req.body || {};
 
@@ -720,6 +1171,7 @@ app.post(
         accepted: true,
         messageId: result?.key?.id || null
       });
+
     } catch (error) {
       console.error(
         `[${account.id}] Échec de l'envoi :`,
@@ -764,15 +1216,18 @@ async function restoreAccounts() {
 }
 
 // ---------------------------------------------------------------------
-// Démarrage et arrêt du serveur
+// Arrêt propre du serveur
 // ---------------------------------------------------------------------
 
 async function shutdown(signal) {
   console.log(`Arrêt de la passerelle (${signal})...`);
 
   for (const account of accounts.values()) {
+    account.manualLogout = true;
+
     if (account.reconnectTimer) {
       clearTimeout(account.reconnectTimer);
+      account.reconnectTimer = null;
     }
 
     try {
@@ -782,12 +1237,26 @@ async function shutdown(signal) {
     }
   }
 
+  for (const client of sseClients) {
+    try {
+      client.response.end();
+    } catch {
+      // Arrêt best effort.
+    }
+  }
+
+  sseClients.clear();
+
   if (server) {
     await new Promise(resolve => server.close(resolve));
   }
 
   process.exit(0);
 }
+
+// ---------------------------------------------------------------------
+// Démarrage
+// ---------------------------------------------------------------------
 
 async function main() {
   await fs.mkdir(ACCOUNTS_PATH, {
