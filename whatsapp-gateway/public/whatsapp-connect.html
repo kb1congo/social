@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connexion WhatsApp - Gateway</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 30px 16px;
+            font-family: Arial, sans-serif;
+            background: #f3f4f6;
+            color: #1f2937;
+        }
+        main {
+            width: 100%;
+            max-width: 460px;
+            margin: 40px auto;
+            padding: 28px;
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 4px 20px rgba(0,0,0,.07);
+            text-align: center;
+        }
+        h1 { font-size: 23px; margin-top: 0; }
+        p { color: #6b7280; line-height: 1.5; }
+        input, button {
+            width: 100%;
+            padding: 13px;
+            margin-top: 12px;
+            border-radius: 8px;
+            font-size: 15px;
+        }
+        input { border: 1px solid #d1d5db; }
+        button {
+            border: 0;
+            background: #168a52;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:disabled { opacity: .6; cursor: wait; }
+        #disconnect { background: #d97706; }
+        #logout { background: #b91c1c; }
+        #account-actions { margin-top: 10px; }
+        #qr {
+            display: none;
+            width: 280px;
+            max-width: 100%;
+            margin: 24px auto;
+        }
+        #status { font-weight: bold; margin-top: 20px; }
+        #message { font-size: 14px; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Connexion WhatsApp</h1>
+    <p>Saisissez votre jeton d'accès pour associer votre compte WhatsApp.</p>
+
+    <input id="token" type="password" placeholder="Jeton JWT" autocomplete="off">
+    <button id="connect">Démarrer la connexion</button>
+
+    <div id="account-actions" style="display:none">
+        <button id="disconnect">Déconnecter</button>
+        <button id="logout">Déconnecter définitivement</button>
+    </div>
+
+    <div id="status">En attente</div>
+    <img id="qr" alt="QR code de connexion WhatsApp">
+    <p id="message">Le QR code apparaîtra ici après le démarrage.</p>
+</main>
+
+<script>
+(() => {
+    const tokenInput = document.getElementById('token');
+    const connectButton = document.getElementById('connect');
+    const disconnectButton = document.getElementById('disconnect');
+    const logoutButton = document.getElementById('logout');
+    const accountActions = document.getElementById('account-actions');
+    const statusElement = document.getElementById('status');
+    const messageElement = document.getElementById('message');
+    const qrElement = document.getElementById('qr');
+
+    let token = '';
+    let polling = false;
+    let timer = null;
+
+    async function apiRequest(path, method = 'GET') {
+        const response = await fetch(path, {
+            method,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/json'
+            }
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            throw new Error(result.message || 'Erreur de communication avec l’API.');
+        }
+
+        return result.data;
+    }
+
+    function stopPolling() {
+        polling = false;
+        if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+        }
+    }
+
+    async function refreshStatus() {
+        if (!polling) return;
+
+        try {
+            const data = await apiRequest('/api/whatsapp/status');
+
+            statusElement.textContent = 'Statut : ' + data.status;
+
+            if (data.status === 'qr' && data.qrImage) {
+                qrElement.src = data.qrImage;
+                qrElement.style.display = 'block';
+                messageElement.textContent =
+                    'Sur votre téléphone, ouvrez WhatsApp > Appareils connectés > Connecter un appareil, puis scannez ce QR code.';
+            } else if (data.status === 'connected') {
+                accountActions.style.display = 'block';
+                connectButton.disabled = true;
+                qrElement.style.display = 'none';
+                messageElement.textContent =
+                    'WhatsApp est connecté au numéro ' + (data.phoneNumber || 'associé') + '.';
+                stopPolling();
+            } else if (data.status === 'connecting') {
+                qrElement.style.display = 'none';
+                messageElement.textContent = 'Connexion à WhatsApp en cours…';
+            } else {
+                qrElement.style.display = 'none';
+                messageElement.textContent =
+                    data.lastError || 'En attente du QR code…';
+            }
+        } catch (error) {
+            messageElement.textContent = error.message;
+            if (error.message.toLowerCase().includes('token')) {
+                stopPolling();
+            }
+        }
+    }
+
+    async function performAccountAction(action, confirmationMessage) {
+        if (confirmationMessage && !window.confirm(confirmationMessage)) {
+            return;
+        }
+
+        stopPolling();
+        disconnectButton.disabled = true;
+        logoutButton.disabled = true;
+        connectButton.disabled = true;
+        statusElement.textContent = 'Opération en cours…';
+        qrElement.style.display = 'none';
+
+        try {
+            const data = await apiRequest('/api/whatsapp/' + action, 'POST');
+            statusElement.textContent = 'Statut : ' + data.status;
+
+            if (action === 'disconnect') {
+                messageElement.textContent =
+                    'WhatsApp est déconnecté. Les identifiants sont conservés ; vous pourrez vous reconnecter sans scanner un nouveau QR code.';
+            } else {
+                messageElement.textContent =
+                    'Le compte WhatsApp est déconnecté définitivement. Les identifiants ont été supprimés ; un nouveau QR code sera nécessaire.';
+            }
+
+            connectButton.disabled = false;
+        } catch (error) {
+            messageElement.textContent = error.message;
+            connectButton.disabled = false;
+        } finally {
+            disconnectButton.disabled = false;
+            logoutButton.disabled = false;
+        }
+    }
+
+    disconnectButton.addEventListener('click', () => {
+        performAccountAction('disconnect');
+    });
+
+    logoutButton.addEventListener('click', () => {
+        performAccountAction(
+            'logout',
+            'Cette opération supprimera les identifiants WhatsApp enregistrés. Un nouveau scan du QR code sera nécessaire. Continuer ?'
+        );
+    });
+
+    connectButton.addEventListener('click', async () => {
+        const enteredToken = tokenInput.value.trim();
+        if (enteredToken) {
+            token = enteredToken;
+        }
+
+        if (!token) {
+            messageElement.textContent = 'Veuillez saisir votre jeton JWT.';
+            return;
+        }
+
+        connectButton.disabled = true;
+        stopPolling();
+        qrElement.style.display = 'none';
+        statusElement.textContent = 'Démarrage…';
+
+        try {
+            await apiRequest('/api/whatsapp/connect', 'POST');
+
+            tokenInput.value = '';
+            tokenInput.disabled = true;
+            accountActions.style.display = 'block';
+            polling = true;
+
+            await refreshStatus();
+            timer = setInterval(refreshStatus, 3000);
+        } catch (error) {
+            messageElement.textContent = error.message;
+            connectButton.disabled = false;
+        }
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#47184d">
+    <title>WhatsApp Gateway - Connexion</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            font-family: Arial, sans-serif;
+            background: #f5f3f6;
+            color: #29232b;
+        }
+        .container {
+            width: 100%;
+            max-width: 430px;
+            background: #fff;
+            padding: 36px;
+            border-radius: 16px;
+            box-shadow: 0 8px 35px rgba(40, 20, 45, .09);
+        }
+        .brand {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .brand-mark {
+            width: 58px;
+            height: 58px;
+            display: grid;
+            place-items: center;
+            margin: 0 auto 14px;
+            border-radius: 18px;
+            background: #47184d;
+            color: #fff;
+            font-size: 27px;
+            font-weight: bold;
+        }
+        h1 { margin: 0 0 8px; font-size: 23px; color: #47184d; }
+        .subtitle { margin: 0; color: #777; font-size: 14px; }
+        .field { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 7px; font-size: 13px; font-weight: 600; }
+        input {
+            width: 100%;
+            padding: 13px 14px;
+            border: 1px solid #ddd5df;
+            border-radius: 8px;
+            font-size: 15px;
+            outline: none;
+        }
+        input:focus { border-color: #762372; box-shadow: 0 0 0 3px #76237218; }
+        button {
+            width: 100%;
+            padding: 14px;
+            border: 0;
+            border-radius: 8px;
+            background: #762372;
+            color: white;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:disabled { opacity: .6; cursor: wait; }
+        .message {
+            display: none;
+            margin-top: 18px;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .message.error { display: block; color: #a32626; background: #fff0f0; }
+        .message.info { display: block; color: #47184d; background: #f5eff7; }
+        .qr-section { display: none; text-align: center; }
+        .qr-section h2 { color: #47184d; font-size: 19px; }
+        .qr-section p { color: #666; font-size: 14px; line-height: 1.5; }
+        .qr-image {
+            width: 260px;
+            max-width: 100%;
+            margin: 15px auto;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 10px;
+        }
+        .spinner {
+            width: 24px;
+            height: 24px;
+            margin: 18px auto;
+            border: 3px solid #eee;
+            border-top-color: #762372;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .footer { margin-top: 25px; text-align: center; color: #999; font-size: 11px; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+<main class="container">
+    <header class="brand">
+        <div class="brand-mark">W</div>
+        <h1>WhatsApp Gateway</h1>
+        <p class="subtitle">Connectez-vous à votre espace de messagerie</p>
+    </header>
+
+    <form id="loginForm">
+        <div class="field">
+            <label for="email">Adresse email</label>
+            <input type="email" id="email" autocomplete="username" required>
+        </div>
+        <div class="field">
+            <label for="password">Mot de passe</label>
+            <input type="password" id="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" id="loginButton">Se connecter</button>
+    </form>
+
+    <section id="qrSection" class="qr-section">
+        <h2>Connexion à WhatsApp</h2>
+        <p id="qrInstructions">Préparation de votre connexion WhatsApp...</p>
+        <div id="spinner" class="spinner"></div>
+        <img id="qrImage" class="qr-image hidden" alt="QR code WhatsApp">
+        <p id="qrHelp" class="hidden">
+            Ouvrez WhatsApp sur votre téléphone, puis
+            Appareils connectés → Connecter un appareil.
+            Scannez ce QR code.
+        </p>
+    </section>
+
+    <div id="message" class="message"></div>
+    <footer class="footer">WhatsApp Gateway · Connexion sécurisée</footer>
+</main>
+
+<script>
+(() => {
+    const form = document.getElementById('loginForm');
+    const loginButton = document.getElementById('loginButton');
+    const qrSection = document.getElementById('qrSection');
+    const qrImage = document.getElementById('qrImage');
+    const qrInstructions = document.getElementById('qrInstructions');
+    const qrHelp = document.getElementById('qrHelp');
+    const spinner = document.getElementById('spinner');
+    const message = document.getElementById('message');
+
+    let token = sessionStorage.getItem('whatsapp_gateway_token');
+    let polling = false;
+    let pollTimer = null;
+
+    function showMessage(text, type = 'info') {
+        message.textContent = text;
+        message.className = 'message ' + type;
+    }
+
+    function clearMessage() {
+        message.textContent = '';
+        message.className = 'message';
+    }
+
+    function showQrSection() {
+        form.classList.add('hidden');
+        qrSection.style.display = 'block';
+    }
+
+    function showQr(data) {
+        if (data.qrImage) {
+            qrImage.src = data.qrImage;
+            qrImage.classList.remove('hidden');
+            qrHelp.classList.remove('hidden');
+            spinner.classList.add('hidden');
+            qrInstructions.textContent = 'Scannez ce QR code avec votre téléphone.';
+        } else if (data.status === 'connecting') {
+            qrInstructions.textContent = 'Initialisation de la session WhatsApp...';
+            spinner.classList.remove('hidden');
+        } else if (data.status === 'qr') {
+            qrInstructions.textContent = 'Génération du QR code...';
+            spinner.classList.remove('hidden');
+        }
+    }
+
+    async function api(path, options = {}) {
+        const response = await fetch(path, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: 'Bearer ' + token } : {}),
+                ...(options.headers || {})
+            }
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (response.status === 401) {
+            sessionStorage.removeItem('whatsapp_gateway_token');
+            token = null;
+            throw new Error('Votre session a expiré. Veuillez vous reconnecter.');
+        }
+
+        if (!response.ok || result.status === 'error') {
+            throw new Error(result.message || 'Une erreur est survenue.');
+        }
+
+        return result;
+    }
+
+    async function checkWhatsAppStatus() {
+        const result = await api('/api/whatsapp/status');
+        const data = result.data || {};
+
+        if (data.status === 'connected') {
+            clearInterval(pollTimer);
+            location.replace('/chat.html');
+            return true;
+        }
+
+        showQr(data);
+        if (data.lastError) {
+            showMessage(data.lastError, 'error');
+        }
+        return false;
+    }
+
+    async function startWhatsAppConnection() {
+        showQrSection();
+        showMessage('Vérification de votre compte WhatsApp...');
+
+        try {
+            const current = await api('/api/whatsapp/status');
+            const status = current.data || {};
+
+            if (status.status === 'connected') {
+                location.replace('/chat.html');
+                return;
+            }
+
+            if (status.status === 'qr') {
+                showQr(status);
+            } else if (status.status === 'connecting') {
+                showQr(status);
+            } else {
+                qrInstructions.textContent = 'Démarrage de la connexion WhatsApp...';
+                await api('/api/whatsapp/connect', { method: 'POST', body: '{}' });
+            }
+
+            clearMessage();
+
+            if (!polling) {
+                polling = true;
+                pollTimer = setInterval(async () => {
+                    try {
+                        await checkWhatsAppStatus();
+                    } catch (error) {
+                        clearInterval(pollTimer);
+                        polling = false;
+                        showMessage(error.message, 'error');
+                    }
+                }, 2000);
+            }
+        } catch (error) {
+            showMessage(error.message, 'error');
+            if (!token) {
+                form.classList.remove('hidden');
+                qrSection.style.display = 'none';
+            }
+        }
+    }
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        clearMessage();
+        loginButton.disabled = true;
+        loginButton.textContent = 'Connexion...';
+
+        try {
+            const result = await api('/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({
+                    email: document.getElementById('email').value.trim(),
+                    password: document.getElementById('password').value
+                })
+            });
+
+            token = result.data.token;
+            sessionStorage.setItem('whatsapp_gateway_token', token);
+            document.getElementById('password').value = '';
+            await startWhatsAppConnection();
+        } catch (error) {
+            showMessage(error.message, 'error');
+        } finally {
+            loginButton.disabled = false;
+            loginButton.textContent = 'Se connecter';
+        }
+    });
+
+    if (token) {
+        startWhatsAppConnection();
+    }
+})();
+</script>
+</body>
+</html>
