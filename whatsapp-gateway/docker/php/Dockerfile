@@ -5,11 +5,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libzip-dev \
     libonig-dev \
+    libcurl4-openssl-dev \
     && docker-php-ext-install \
     pdo_mysql \
     opcache \
     zip \
     mbstring \
+    curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
