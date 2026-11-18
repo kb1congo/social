@@ -166,6 +166,19 @@ final class ConversationController
                 $beforeId
             );
 
+            // Exposer uniquement une URL API, jamais le chemin physique du média.
+            foreach ($messages as &$message) {
+                if (!empty($message['media_path'])) {
+                    $message['media_url'] = '/api/messages/' .
+                        (int) $message['id'] . '/media';
+                } else {
+                    $message['media_url'] = null;
+                }
+
+                unset($message['media_path']);
+            }
+            unset($message);
+
             $participants = $this->conversationRepository->findParticipants(
                 $conversationId
             );
@@ -188,6 +201,190 @@ final class ConversationController
             return JsonResponse::send($response, [
                 'status' => 'error',
                 'message' => 'Impossible de récupérer les messages.'
+            ], 500);
+        }
+    }
+
+    public function media(
+        ServerRequestInterface $request,
+        ResponseInterface $response,
+        array $args
+    ): ResponseInterface {
+        try {
+            $user = $request->getAttribute('auth_user');
+            $userId = (int) ($user['id'] ?? 0);
+
+            if ($userId <= 0) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Utilisateur non authentifié.'
+                ], 401);
+            }
+
+            $messageId = filter_var(
+                $args['id'] ?? null,
+                FILTER_VALIDATE_INT
+            );
+
+            if ($messageId === false || $messageId === null || $messageId <= 0) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Identifiant de message invalide.'
+                ], 400);
+            }
+
+            $account = $this->accountRepository->findByUserId($userId);
+
+            if (!$account) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Média introuvable.'
+                ], 404);
+            }
+
+            $accountId = (int) $account['id'];
+            $message = $this->messageRepository->findById(
+                $messageId,
+                $accountId
+            );
+
+            if (!$message || empty($message['media_path'])) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Média introuvable.'
+                ], 404);
+            }
+
+            $relativePath = (string) $message['media_path'];
+
+            if (!preg_match(
+                '#^' . preg_quote((string) $accountId, '#') . '/[a-f0-9]{64}(?:\.[A-Za-z0-9]{1,10})?$#D',
+                $relativePath
+            )) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Chemin du média invalide.'
+                ], 404);
+            }
+
+            $storageRoot = getenv('MEDIA_STORAGE_PATH');
+
+            if ($storageRoot === false || $storageRoot === '') {
+                throw new \RuntimeException('MEDIA_STORAGE_PATH non configuré.');
+            }
+
+            $realRoot = realpath($storageRoot);
+
+            if ($realRoot === false || !is_dir($realRoot)) {
+                throw new \RuntimeException('Répertoire des médias inaccessible.');
+            }
+
+            $filePath = realpath(
+                $realRoot . DIRECTORY_SEPARATOR .
+                str_replace('/', DIRECTORY_SEPARATOR, $relativePath)
+            );
+
+            if (
+                $filePath === false ||
+                !is_file($filePath) ||
+                !is_readable($filePath) ||
+                strpos($filePath, $realRoot . DIRECTORY_SEPARATOR) !== 0
+            ) {
+                return JsonResponse::send($response, [
+                    'status' => 'error',
+                    'message' => 'Fichier média introuvable.'
+                ], 404);
+            }
+
+            $mimeType = (string) ($message['media_mime_type'] ?? '');
+
+            if (!preg_match('/^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/D', $mimeType)) {
+                $mimeType = 'application/octet-stream';
+            }
+
+            $inlineTypes = [
+                'image/jpeg',
+                'image/png',
+                'image/gif',
+                'image/webp'
+            ];
+
+            $disposition = in_array($mimeType, $inlineTypes, true)
+                ? 'inline'
+                : 'attachment';
+
+            $fileName = (string) ($message['file_name'] ?? 'media');
+
+            $fileName = preg_replace(
+                '/[\\\\\/:*?"<>|\x00-\x1F\x7F]/',
+                '_',
+                $fileName
+            ) ?? 'media';
+
+            $fileName = trim($fileName);
+
+            if ($fileName === '') {
+                $fileName = 'media';
+            }
+
+            $fallbackName = preg_replace(
+                '/[^A-Za-z0-9._-]/',
+                '_',
+                $fileName
+            ) ?? 'media';
+
+            $fallbackName = trim($fallbackName, '._');
+
+            if ($fallbackName === '') {
+                $fallbackName = 'media';
+            }
+
+            $fileSize = filesize($filePath);
+
+            if ($fileSize === false) {
+                throw new \RuntimeException('Impossible de déterminer la taille du média.');
+            }
+
+            $handle = fopen($filePath, 'rb');
+
+            if ($handle === false) {
+                throw new \RuntimeException('Impossible d’ouvrir le média.');
+            }
+
+            try {
+                while (!feof($handle)) {
+                    $chunk = fread($handle, 8192);
+
+                    if ($chunk === false) {
+                        throw new \RuntimeException('Erreur de lecture du média.');
+                    }
+
+                    if ($chunk === '') {
+                        break;
+                    }
+
+                    $response->getBody()->write($chunk);
+                }
+            } finally {
+                fclose($handle);
+            }
+
+            return $response
+                ->withHeader('Content-Type', $mimeType)
+                ->withHeader('Content-Length', (string) $fileSize)
+                ->withHeader('Content-Disposition',
+                    $disposition . '; filename="' . $fallbackName .
+                    '"; filename*=UTF-8\'\'' . rawurlencode($fileName)
+                )
+                ->withHeader('X-Content-Type-Options', 'nosniff')
+                ->withHeader('Cache-Control', 'private, no-store');
+
+        } catch (Throwable $e) {
+            error_log('[ConversationController::media] ' . $e->getMessage());
+
+            return JsonResponse::send($response, [
+                'status' => 'error',
+                'message' => 'Impossible de récupérer le média.'
             ], 500);
         }
     }

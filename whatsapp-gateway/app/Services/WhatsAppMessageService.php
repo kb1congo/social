@@ -97,6 +97,54 @@ final class WhatsAppMessageService
 
         $sentAt = gmdate('Y-m-d H:i:s', $timestamp) . '.000';
 
+        // Validation des métadonnées du média.
+        $mediaPath = isset($data['mediaPath'])
+            ? trim((string) $data['mediaPath'])
+            : null;
+
+        if ($mediaPath === '') {
+            $mediaPath = null;
+        }
+
+        if (
+            $mediaPath !== null &&
+            !preg_match(
+                '#^' . preg_quote((string) $accountId, '#') . '/[a-f0-9]{64}(?:\.[A-Za-z0-9]{1,10})?$#D',
+                $mediaPath
+            )
+        ) {
+            throw new InvalidArgumentException('Chemin du média invalide.');
+        }
+
+        $fileName = isset($data['fileName'])
+            ? trim((string) $data['fileName'])
+            : null;
+
+        if ($fileName === '') {
+            $fileName = null;
+        }
+
+        if ($fileName !== null) {
+            $fileName = preg_replace('/[\x00-\x1F\x7F]/', '', $fileName) ?? '';
+            $fileName = function_exists('mb_strcut')
+                ? mb_strcut($fileName, 0, 255, 'UTF-8')
+                : substr($fileName, 0, 255);
+
+            if ($fileName === '') {
+                $fileName = null;
+            }
+        }
+
+        $fileSize = null;
+
+        if (isset($data['fileSize'])) {
+            $fileSize = filter_var($data['fileSize'], FILTER_VALIDATE_INT);
+
+            if ($fileSize === false || $fileSize < 0) {
+                throw new InvalidArgumentException('Taille du média invalide.');
+            }
+        }
+
         $this->pdo->beginTransaction();
 
         try {
@@ -176,12 +224,14 @@ final class WhatsAppMessageService
                 isset($data['mediaMimeType'])
                     ? (string) $data['mediaMimeType']
                     : null,
-                null,
+                $mediaPath,
                 isset($data['payload']) && is_array($data['payload'])
                     ? $data['payload']
                     : null,
                 $fromMe ? 'sent' : 'delivered',
-                $sentAt
+                $sentAt,
+                $fileName,
+                $fileSize
             );
 
             $this->pdo->commit();

@@ -6,7 +6,6 @@ namespace App\Repositories;
 
 use App\Database\Database;
 use PDO;
-use JsonException;
 
 final class MessageRepository
 {
@@ -29,7 +28,9 @@ final class MessageRepository
         ?string $mediaPath = null,
         ?array $payload = null,
         string $deliveryStatus = 'sent',
-        ?string $sentAt = null
+        ?string $sentAt = null,
+        ?string $fileName = null,
+        ?int $fileSize = null
     ): int {
         $statement = $this->pdo->prepare(
             'INSERT INTO messages (
@@ -42,6 +43,8 @@ final class MessageRepository
                 body,
                 media_mime_type,
                 media_path,
+                file_name,
+                file_size,
                 payload,
                 delivery_status,
                 sent_at
@@ -55,12 +58,18 @@ final class MessageRepository
                 :body,
                 :media_mime_type,
                 :media_path,
+                :file_name,
+                :file_size,
                 :payload,
                 :delivery_status,
                 :sent_at
-            )
+            ) AS new
             ON DUPLICATE KEY UPDATE
-                id = LAST_INSERT_ID(id)'
+                id = LAST_INSERT_ID(id),
+                media_path = COALESCE(new.media_path, messages.media_path),
+                file_name = COALESCE(new.file_name, messages.file_name),
+                file_size = COALESCE(new.file_size, messages.file_size),
+                media_mime_type = COALESCE(new.media_mime_type, messages.media_mime_type)'
         );
 
         $statement->execute([
@@ -73,6 +82,8 @@ final class MessageRepository
             'body' => $body,
             'media_mime_type' => $mediaMimeType,
             'media_path' => $mediaPath,
+            'file_name' => $fileName,
+            'file_size' => $fileSize,
             'payload' => $payload === null
                 ? null
                 : json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),

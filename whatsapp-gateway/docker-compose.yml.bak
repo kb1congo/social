@@ -1,0 +1,82 @@
+services:
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: whatsapp-v2-nginx
+    restart: unless-stopped
+    ports:
+      - "8085:80"
+    volumes:
+      - ./public:/var/www/html/public:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - php
+    networks:
+      - whatsapp-v2
+
+  php:
+    build:
+      context: ./docker/php
+      dockerfile: Dockerfile
+    container_name: whatsapp-v2-php
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./:/var/www/html
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - whatsapp-v2
+
+  node:
+    build:
+      context: ./whatsapp-service
+      dockerfile: Dockerfile
+    container_name: whatsapp-v2-node
+    restart: unless-stopped
+    working_dir: /opt/whatsapp-service
+    volumes:
+      - ./whatsapp-service:/opt/whatsapp-service
+      - whatsapp_v2_sessions:/opt/whatsapp-service/sessions
+      - whatsapp_v2_node_modules:/opt/whatsapp-service/node_modules
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${NODE_PORT}
+      PHP_INTERNAL_URL: http://nginx
+      NODE_API_SECRET: ${NODE_API_SECRET}
+    depends_on:
+      - nginx
+    networks:
+      - whatsapp-v2
+
+  mysql:
+    image: mysql:8.4
+    container_name: whatsapp-v2-mysql
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - whatsapp_v2_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - whatsapp-v2
+
+volumes:
+  whatsapp_v2_mysql_data:
+  whatsapp_v2_sessions:
+  whatsapp_v2_node_modules:
+
+networks:
+  whatsapp-v2:
+    driver: bridge

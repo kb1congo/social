@@ -219,10 +219,211 @@
         }
     }
 
+    var mediaObjectUrls = {};
+    var mediaLoading = {};
+    var mediaCallbacks = {};
+    var mediaUrlApi = window.URL || window.webkitURL;
+    var activeMediaIds = {};
+
+    function releaseUnusedMedia(activeIds) {
+        var key;
+
+        for (key in mediaObjectUrls) {
+            if (
+                Object.prototype.hasOwnProperty.call(mediaObjectUrls, key) &&
+                !activeIds[key]
+            ) {
+                if (mediaUrlApi && mediaUrlApi.revokeObjectURL) {
+                    mediaUrlApi.revokeObjectURL(mediaObjectUrls[key]);
+                }
+
+                delete mediaObjectUrls[key];
+            }
+        }
+    }
+
+    function fetchMedia(message, callback) {
+        var key = String(message.id);
+
+        if (mediaObjectUrls[key]) {
+            callback(null, mediaObjectUrls[key]);
+            return;
+        }
+
+        if (mediaLoading[key]) {
+            mediaCallbacks[key].push(callback);
+            return;
+        }
+
+        mediaLoading[key] = true;
+        mediaCallbacks[key] = [callback];
+
+        var xhr = new XMLHttpRequest();
+
+        xhr.open('GET', message.media_url, true);
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.responseType = 'blob';
+
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) {
+                return;
+            }
+
+            var callbacks = mediaCallbacks[key] || [];
+            var error = null;
+            var objectUrl = null;
+
+            delete mediaLoading[key];
+            delete mediaCallbacks[key];
+
+            if (xhr.status === 401) {
+                logout();
+                error = new Error('Session expirée.');
+            } else if (xhr.status < 200 || xhr.status >= 300 || !xhr.response) {
+                error = new Error('Impossible de récupérer ce média.');
+            } else {
+                try {
+                    var mimeType = String(message.media_mime_type || '')
+                        .toLowerCase()
+                        .split(';')[0];
+
+                    var isImage = mimeType === 'image/jpeg' ||
+                        mimeType === 'image/png' ||
+                        mimeType === 'image/gif' ||
+                        mimeType === 'image/webp';
+
+                    var blob = new Blob([xhr.response], {
+                        type: isImage ? mimeType : 'application/octet-stream'
+                    });
+
+                    objectUrl = mediaUrlApi.createObjectURL(blob);
+
+                    if (activeMediaIds[key]) {
+                        mediaObjectUrls[key] = objectUrl;
+                    } else {
+                        mediaUrlApi.revokeObjectURL(objectUrl);
+                        objectUrl = null;
+                        error = new Error('Le message ne fait plus partie de la conversation.');
+                    }
+                } catch (e) {
+                    error = new Error('Impossible de préparer ce média.');
+                }
+            }
+
+            var i;
+
+            for (i = 0; i < callbacks.length; i++) {
+                callbacks[i](error, objectUrl);
+            }
+        };
+
+        xhr.onerror = function () {
+            var callbacks = mediaCallbacks[key] || [];
+
+            delete mediaLoading[key];
+            delete mediaCallbacks[key];
+
+            var i;
+
+            for (i = 0; i < callbacks.length; i++) {
+                callbacks[i](new Error('Erreur lors du téléchargement du média.'));
+            }
+        };
+
+        xhr.send(null);
+    }
+
+    function renderMedia(message, container) {
+        var loading = document.createElement('div');
+        loading.className = 'media-loading';
+        loading.textContent = 'Chargement du média...';
+        container.appendChild(loading);
+
+        fetchMedia(message, function (error, objectUrl) {
+            if (!container.parentNode) {
+                return;
+            }
+
+            clearElement(container);
+
+            if (error || !objectUrl) {
+                var unavailable = document.createElement('div');
+                unavailable.className = 'media-error';
+                unavailable.textContent = 'Média indisponible.';
+                container.appendChild(unavailable);
+                return;
+            }
+
+            var mimeType = String(message.media_mime_type || '')
+                .toLowerCase()
+                .split(';')[0];
+
+            var fileName = String(message.file_name || 'media');
+
+            if (
+                mimeType === 'image/jpeg' ||
+                mimeType === 'image/png' ||
+                mimeType === 'image/gif' ||
+                mimeType === 'image/webp'
+            ) {
+                var link = document.createElement('a');
+                link.className = 'media-image-link';
+                link.href = objectUrl;
+                link.target = '_blank';
+
+                var image = document.createElement('img');
+                image.className = 'bubble-image';
+                image.src = objectUrl;
+                image.alt = fileName;
+
+                link.appendChild(image);
+                container.appendChild(link);
+                return;
+            }
+
+            var download = document.createElement('a');
+            download.className = 'media-download';
+            download.href = objectUrl;
+            download.setAttribute('download', fileName);
+            download.textContent = 'Télécharger : ' + fileName;
+
+            download.addEventListener('click', function () {
+                if (!('download' in document.createElement('a'))) {
+                    window.open(objectUrl, '_blank');
+                }
+            });
+
+            container.appendChild(download);
+
+            if (message.file_size) {
+                var size = document.createElement('div');
+                size.className = 'media-size';
+                size.textContent = Math.round(
+                    Number(message.file_size) / 1024
+                ) + ' Ko';
+                container.appendChild(size);
+            }
+        });
+    }
+
     function renderMessages(messages, keepScroll) {
         var nearBottom = messagesBox.scrollHeight -
             messagesBox.scrollTop -
             messagesBox.clientHeight < 100;
+
+        var nextActiveMediaIds = {};
+        var mediaIndex;
+
+        if (messages && messages.length) {
+            for (mediaIndex = 0; mediaIndex < messages.length; mediaIndex++) {
+                if (messages[mediaIndex].media_url) {
+                    nextActiveMediaIds[String(messages[mediaIndex].id)] = true;
+                }
+            }
+        }
+
+        activeMediaIds = nextActiveMediaIds;
+        releaseUnusedMedia(activeMediaIds);
 
         clearElement(messagesBox);
 
@@ -246,31 +447,43 @@
                     ? 'outgoing'
                     : 'incoming');
 
-            var content = document.createElement('div');
-            content.className = 'bubble-text';
+            if (currentMessage.body) {
+                var content = document.createElement('div');
+                content.className = 'bubble-text';
+                content.textContent = currentMessage.body;
+                bubble.appendChild(content);
+            } else if (!currentMessage.media_url) {
+                var fallback = document.createElement('div');
+                fallback.className = 'bubble-text';
+                fallback.textContent =
+                    '[' + (currentMessage.message_type || 'Message') + ']';
+                bubble.appendChild(fallback);
+            }
 
-            content.textContent = currentMessage.body ||
-                '[' + (currentMessage.message_type || 'Message') + ']';
+            if (currentMessage.media_url) {
+                var media = document.createElement('div');
+                media.className = 'bubble-media';
+                bubble.appendChild(media);
+                renderMedia(currentMessage, media);
+            }
 
             var meta = document.createElement('div');
             meta.className = 'bubble-meta';
 
             var time = document.createElement('span');
             time.textContent = formatTime(currentMessage.sent_at);
-
             meta.appendChild(time);
 
-            if (Number(currentMessage.from_me) === 1 &&
-                currentMessage.delivery_status) {
-
+            if (
+                Number(currentMessage.from_me) === 1 &&
+                currentMessage.delivery_status
+            ) {
                 var status = document.createElement('span');
                 status.textContent = currentMessage.delivery_status;
                 meta.appendChild(status);
             }
 
-            bubble.appendChild(content);
             bubble.appendChild(meta);
-
             messagesBox.appendChild(bubble);
         }
 

@@ -214,6 +214,50 @@
             white-space: pre-wrap;
         }
 
+        .bubble-media {
+            margin-top: 8px;
+            max-width: 100%;
+        }
+
+        .media-image-link {
+            display: inline-block;
+            max-width: 100%;
+        }
+
+        .bubble-image {
+            display: block;
+            max-width: 100%;
+            max-height: 360px;
+            width: auto;
+            height: auto;
+            border-radius: 7px;
+            cursor: pointer;
+        }
+
+        .media-download {
+            display: inline-block;
+            max-width: 100%;
+            padding: 9px 12px;
+            border-radius: 7px;
+            background: #f2eaf4;
+            color: #762372;
+            font-size: 13px;
+            overflow-wrap: anywhere;
+            text-decoration: none;
+        }
+
+        .media-download:hover {
+            text-decoration: underline;
+        }
+
+        .media-size,
+        .media-loading,
+        .media-error {
+            margin-top: 5px;
+            color: #888;
+            font-size: 11px;
+        }
+
         .bubble-meta {
             display: flex;
             justify-content: flex-end;

@@ -22,8 +22,11 @@ services:
     working_dir: /var/www/html
     volumes:
       - ./:/var/www/html
+      - whatsapp_v2_media:/var/www/html/storage/media
     env_file:
       - .env
+    environment:
+      MEDIA_STORAGE_PATH: /var/www/html/storage/media
     depends_on:
       mysql:
         condition: service_healthy
@@ -41,11 +44,13 @@ services:
       - ./whatsapp-service:/opt/whatsapp-service
       - whatsapp_v2_sessions:/opt/whatsapp-service/sessions
       - whatsapp_v2_node_modules:/opt/whatsapp-service/node_modules
+      - whatsapp_v2_media:/opt/whatsapp-service/media
     environment:
       NODE_ENV: ${NODE_ENV}
       PORT: ${NODE_PORT}
       PHP_INTERNAL_URL: http://nginx
       NODE_API_SECRET: ${NODE_API_SECRET}
+      MEDIA_STORAGE_PATH: /opt/whatsapp-service/media
     depends_on:
       - nginx
     networks:
@@ -76,6 +81,7 @@ volumes:
   whatsapp_v2_mysql_data:
   whatsapp_v2_sessions:
   whatsapp_v2_node_modules:
+  whatsapp_v2_media:
 
 networks:
   whatsapp-v2:

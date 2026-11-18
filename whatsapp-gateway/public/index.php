@@ -82,6 +82,12 @@ $app->post(
 )->add(new AuthMiddleware());
 
 
+// Téléchargement sécurisé des médias des messages.
+$app->get(
+    '/api/messages/{id}/media',
+    [$conversationController, 'media']
+)->add(new AuthMiddleware());
+
 // Consultation des conversations et de leurs messages.
 $app->get(
     '/api/conversations',

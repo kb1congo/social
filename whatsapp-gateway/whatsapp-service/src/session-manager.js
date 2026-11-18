@@ -1,10 +1,12 @@
 import makeWASocket, {
     useMultiFileAuthState,
-    DisconnectReason
+    DisconnectReason,
+    downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 
 const sessions = new Map();
@@ -61,6 +63,138 @@ async function synchronizeStatusWithPhp(accountId, session) {
 }
 
 
+async function storeIncomingMedia(accountId, socket, message, messageType, contentData) {
+    const supportedTypes = [
+        'imageMessage',
+        'videoMessage',
+        'documentMessage',
+        'audioMessage',
+        'stickerMessage'
+    ];
+
+    if (!supportedTypes.includes(messageType)) {
+        return {
+            mediaPath: null,
+            fileName: null,
+            fileSize: null
+        };
+    }
+
+    const maxMediaSize = Number.parseInt(
+        process.env.MAX_MEDIA_SIZE_BYTES || '52428800',
+        10
+    );
+
+    try {
+        const declaredSize = Number(
+            contentData.fileLength?.toNumber?.() ??
+            contentData.fileLength ??
+            0
+        );
+
+        if (declaredSize > maxMediaSize) {
+            console.warn(
+                `[MEDIA] Compte ${accountId} : média ignoré, taille supérieure à la limite autorisée.`
+            );
+            return { mediaPath: null, fileName: null, fileSize: null };
+        }
+
+        const buffer = await downloadMediaMessage(
+            message,
+            'buffer',
+            {},
+            {
+                logger,
+                reuploadRequest: socket.updateMediaMessage
+            }
+        );
+
+        if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+            throw new Error('Le téléchargement a retourné un fichier vide.');
+        }
+
+        if (buffer.length > maxMediaSize) {
+            console.warn(
+                `[MEDIA] Compte ${accountId} : média téléchargé mais supérieur à la limite autorisée.`
+            );
+            return { mediaPath: null, fileName: null, fileSize: null };
+        }
+
+        const mimeType = String(contentData.mimetype || '')
+            .split(';')[0]
+            .trim()
+            .toLowerCase();
+
+        const extensions = {
+            'image/jpeg': 'jpg',
+            'image/png': 'png',
+            'image/gif': 'gif',
+            'image/webp': 'webp',
+            'image/heic': 'heic',
+            'video/mp4': 'mp4',
+            'video/3gpp': '3gp',
+            'video/quicktime': 'mov',
+            'audio/ogg': 'ogg',
+            'audio/mpeg': 'mp3',
+            'audio/mp4': 'm4a',
+            'audio/aac': 'aac',
+            'audio/amr': 'amr',
+            'application/pdf': 'pdf',
+            'application/msword': 'doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+            'application/vnd.ms-excel': 'xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+            'application/vnd.ms-powerpoint': 'ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+            'text/plain': 'txt',
+            'application/zip': 'zip'
+        };
+
+        const extension = extensions[mimeType] || 'bin';
+        const hash = crypto
+            .createHash('sha256')
+            .update(String(message.key.id))
+            .digest('hex');
+
+        const relativePath = `${accountId}/${hash}.${extension}`;
+        const storageRoot = path.resolve(
+            process.env.MEDIA_STORAGE_PATH || path.resolve(process.cwd(), 'media')
+        );
+        const accountDirectory = path.join(storageRoot, String(accountId));
+
+        await fs.mkdir(accountDirectory, { recursive: true });
+        await fs.writeFile(
+            path.join(accountDirectory, `${hash}.${extension}`),
+            buffer
+        );
+
+        let fileName = String(
+            contentData.fileName || `${messageType.replace('Message', '')}.${extension}`
+        );
+
+        fileName = fileName
+            .replace(/[\\\/:*?"<>|\x00-\x1F\x7F]/g, '_')
+            .trim()
+            .slice(0, 255);
+
+        return {
+            mediaPath: relativePath,
+            fileName: fileName || `media.${extension}`,
+            fileSize: buffer.length
+        };
+    } catch (error) {
+        console.error(
+            `[MEDIA] Échec du téléchargement du compte ${accountId} : ${error.message}`
+        );
+
+        return {
+            mediaPath: null,
+            fileName: null,
+            fileSize: null
+        };
+    }
+}
+
 async function forwardMessageToPhp(accountId, socket, message) {
     const phpUrl = (process.env.PHP_INTERNAL_URL || '').replace(/\/+$/, '');
     const apiSecret = process.env.NODE_API_SECRET || '';
@@ -101,6 +235,9 @@ async function forwardMessageToPhp(accountId, socket, message) {
     ) || 'unknown';
 
     const contentData = content[messageType] || {};
+    console.log(
+        `[MEDIA DEBUG] Compte ${accountId} : type=${messageType}, mime=${contentData.mimetype || 'absent'}`
+    );
 
     const body =
         content.conversation ||
@@ -120,6 +257,16 @@ async function forwardMessageToPhp(accountId, socket, message) {
             ? rawTimestamp.toNumber()
             : Number(rawTimestamp) || Math.floor(Date.now() / 1000);
 
+    const mediaInfo = await storeIncomingMedia(
+        accountId,
+        socket,
+        message,
+        messageType,
+        contentData
+    );
+
+    console.log('[MEDIA DEBUG] Résultat stockage :', mediaInfo);
+
     const payload = {
         accountId: Number(accountId),
         remoteJid,
@@ -131,6 +278,9 @@ async function forwardMessageToPhp(accountId, socket, message) {
         messageType,
         body: body || null,
         mediaMimeType: contentData.mimetype || null,
+        mediaPath: mediaInfo.mediaPath,
+        fileName: mediaInfo.fileName,
+        fileSize: mediaInfo.fileSize,
         timestamp,
         payload: {
             messageType
