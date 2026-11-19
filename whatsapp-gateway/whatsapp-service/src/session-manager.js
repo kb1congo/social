@@ -447,11 +447,14 @@ export async function connectAccount(accountId) {
 
             if (shouldReconnect) {
                 sessions.delete(id);
+
                 setTimeout(() => {
                     connectAccount(id).catch((error) => {
                         logger.error({ accountId: id, error: error.message });
                     });
                 }, 3000);
+            } else {
+                sessions.delete(id);
             }
         }
 
@@ -527,25 +530,46 @@ export async function disconnectAccount(accountId, logout = false) {
     const id = String(accountId);
     const session = sessions.get(id);
 
-    if (!session) {
+    if (!session && !logout) {
         return getAccountStatus(id);
     }
 
-    sessions.delete(id);
+    if (session) {
+        sessions.delete(id);
+    }
 
     if (logout) {
-        await session.socket.logout();
-        await fs.rm(path.join(sessionsDirectory, id), {
-            recursive: true,
-            force: true
-        });
-    } else {
-        session.socket.end(undefined);
+        try {
+            if (session?.socket) {
+                await session.socket.logout();
+            }
+        } catch (error) {
+            logger.warn({
+                accountId: id,
+                error: error.message
+            }, 'Déconnexion WhatsApp déjà fermée ou impossible.');
+        } finally {
+            await fs.rm(path.join(sessionsDirectory, id), {
+                recursive: true,
+                force: true
+            });
+        }
+
+        return {
+            accountId: Number(id),
+            status: 'logged_out',
+            qr: null,
+            qrImage: null,
+            phoneNumber: null,
+            connectedAt: null
+        };
     }
+
+    session.socket.end(undefined);
 
     return {
         accountId: Number(id),
-        status: logout ? 'logged_out' : 'disconnected',
+        status: 'disconnected',
         qr: null,
         qrImage: null,
         phoneNumber: session.phoneNumber,
